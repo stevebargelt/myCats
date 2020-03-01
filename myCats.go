@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	uuid "github.com/satori/go.uuid"
 	"github.com/spf13/viper"
@@ -82,7 +83,6 @@ func main() {
 		fmt.Printf("Something went wrong creating Iteration UUID: %s", err)
 	}
 
-	litterboxUser := LitterboxUser{"Negative", 0.00}
 	var litterboxPicSet []LitterboxUser
 
 	// creates a new file watcher
@@ -93,6 +93,7 @@ func main() {
 	defer watcher.Close()
 
 	done := make(chan bool)
+	timeout := make(chan bool, 1)
 
 	go func() {
 		for {
@@ -101,57 +102,30 @@ func main() {
 				//log.Println("event:", event)
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					log.Println("created file:", event.Name) //event.Name is the file & path
-					results := Predict(predictionKey, endpointURL, projectID, iterationID, event.Name)
-					for _, prediction := range *results.Predictions {
-						fmt.Printf("\t%s: %.2f%%", *prediction.TagName, *prediction.Probability*100)
-						fmt.Println("")
-						//of the tags in teh model pick the highest probability
-						if *prediction.Probability > litterboxUser.Probability {
-							litterboxUser.Name = *prediction.TagName
-							litterboxUser.Probability = *prediction.Probability
-						}
+					results := predict(predictionKey, endpointURL, projectID, iterationID, event.Name)
+					highestProbabilityTag := processResults(results)
+					litterboxPicSet = append(litterboxPicSet, highestProbabilityTag)
+					// TODO: If this is the first photo then set a timer so we don't wait indef for 5 photos...
+					if len(litterboxPicSet) == 1 {
+						go func() {
+							time.Sleep(15 * time.Second)
+							timeout <- true
+						}()
 					}
-					litterboxPicSet = append(litterboxPicSet, litterboxUser)
 					// Pic the best of the set of 5 pics
 					if len(litterboxPicSet) == 5 {
-						var highestCatProbability = 0.0
-						var highestCatIndex int
-						var highestNegProbability = 0.0
-						var highestNegIndex int
-						var weHaveCat = false
-						fmt.Printf("litterboxPicSet: %v\n", litterboxPicSet)
-						for index, element := range litterboxPicSet {
-							if litterboxUser.Name != "Negative" {
-								if element.Probability > highestCatProbability {
-									highestCatProbability = element.Probability
-									highestCatIndex = index
-									weHaveCat = true
-								}
-							} else {
-								if element.Probability > highestNegProbability {
-									highestNegProbability = element.Probability
-									highestNegIndex = index
-								}
-							}
-						}
-						if weHaveCat {
-							litterboxUser = litterboxPicSet[highestCatIndex]
-						} else {
-							litterboxUser = litterboxPicSet[highestNegIndex]
-						}
-
-						if weHaveCat { //if litterboxUser.Name != "Negative" {
-							fmt.Println("Send this off to some endpoint:")
-							fmt.Printf("I'm %.2f%% sure that %s used the litterbox!\n", litterboxUser.Probability*100, litterboxUser.Name)
-						} else {
-							fmt.Printf("I'm %.2f%% sure that this was a false motion detect!\n", litterboxUser.Probability*100)
-						}
-						litterboxUser.Name = "Default"
-						litterboxUser.Probability = 0.00
+						litterboxUser, weHaveCat := determineResults(litterboxPicSet)
 						litterboxPicSet = nil
-
+						if weHaveCat {
+							fmt.Printf("I am %v sure that %s used the catbox!\n", litterboxUser.Probability*100, litterboxUser.Name)
+						} else {
+							fmt.Printf("I am %v sure that we had a false motion event!\n", litterboxUser.Probability*100)
+						}
 					}
 				}
+			case <-timeout:
+				fmt.Println("Timed Out")
+
 			case err := <-watcher.Errors:
 				log.Println("error:", err)
 			}
@@ -166,7 +140,49 @@ func main() {
 
 }
 
-func Predict(predictionKey string, endpointURL string, projectID uuid.UUID, iterationID uuid.UUID, filepath string) prediction.ImagePrediction {
+func processResults(results prediction.ImagePrediction) LitterboxUser {
+
+	litterboxUser := LitterboxUser{"Negative", 0.00}
+	for _, prediction := range *results.Predictions {
+		fmt.Printf("\t%s: %.2f%%", *prediction.TagName, *prediction.Probability*100)
+		fmt.Println("")
+		//of the tags in the model pick the highest probability
+		if *prediction.Probability > litterboxUser.Probability {
+			litterboxUser.Name = *prediction.TagName
+			litterboxUser.Probability = *prediction.Probability
+		}
+	}
+	return litterboxUser
+}
+
+func determineResults(litterboxPicSet []LitterboxUser) (LitterboxUser, bool) {
+	var highestCatIndex int
+	var highestCatProbability = 0.0
+	var highestNegProbability = 0.0
+	var highestNegIndex int
+	var weHaveCat = false
+	fmt.Printf("litterboxPicSet: %v\n", litterboxPicSet)
+	for index, element := range litterboxPicSet {
+		if element.Name != "Negative" {
+			if element.Probability > highestCatProbability {
+				highestCatProbability = element.Probability
+				highestCatIndex = index
+				weHaveCat = true
+			}
+		} else {
+			if element.Probability > highestNegProbability {
+				highestNegProbability = element.Probability
+				highestNegIndex = index
+			}
+		}
+	}
+	if weHaveCat {
+		return litterboxPicSet[highestCatIndex], weHaveCat
+	}
+	return litterboxPicSet[highestNegIndex], weHaveCat
+}
+
+func predict(predictionKey string, endpointURL string, projectID uuid.UUID, iterationID uuid.UUID, filepath string) prediction.ImagePrediction {
 
 	ctx := context.Background()
 	fmt.Println("Predicting...")
@@ -182,11 +198,10 @@ func Predict(predictionKey string, endpointURL string, projectID uuid.UUID, iter
 		fmt.Println("\n\npredictor.PredictImage Failed.")
 		log.Fatal(err)
 	}
-
 	return results
-
 }
 
+// Next Steps?
 func addLitterBoxTripToFirestore(user LitterboxUser) {
 	ctx := context.Background()
 	sa := option.WithCredentialsFile("path/to/serviceAccount.json")
@@ -208,10 +223,6 @@ func addLitterBoxTripToFirestore(user LitterboxUser) {
 
 }
 
-func TestMyCats() {
-	fmt.Println("This is only a test!")
-}
-
 func writeUserToFirestore(user LitterboxUser) {
 
 	url := "https://us-central1-myupside-65eb1.cloudfunctions.net/databaseUserAddUpdate"
@@ -227,4 +238,8 @@ func writeUserToFirestore(user LitterboxUser) {
 
 	io.Copy(os.Stdout, res.Body)
 
+}
+
+func TestMyCats() {
+	fmt.Println("This is only a test!")
 }
