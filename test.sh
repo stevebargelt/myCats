@@ -1,0 +1,1 @@
+cp /Users/stevebargelt/cats/testBear5Frames/* /Users/stevebargelt/cats/test/
