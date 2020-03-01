@@ -38,6 +38,7 @@ func main() {
 	}
 	viper.SetDefault("NUMBER_PHOTOS_IN_SET", 5)
 	viper.SetDefault("TIMEOUT", 15)
+	viper.SetDefault("READ_DELAY", 1)
 
 	var (
 		projectIDString      = viper.GetString("CUSTOM_VISION_PROJECT_ID")
@@ -48,6 +49,7 @@ func main() {
 		watchFolder          = viper.GetString("WATCH_FOLDER")
 		photosInSet          = viper.GetInt("NUMBER_PHOTOS_IN_SET")
 		timeoutValue         = viper.GetInt("TIMEOUT")
+		readDelay            = viper.GetInt("READ_DELAY")
 	)
 
 	if projectIDString == "" {
@@ -104,9 +106,10 @@ func main() {
 			select {
 			case event := <-watcher.Events:
 				//log.Println("event:", event)
+
 				if event.Op&fsnotify.Create == fsnotify.Create {
-					log.Println("created file:", event.Name) //event.Name is the file & path
-					results := predict(predictor, projectID, iterationID, event.Name)
+					log.Println("create file received:", event.Name) //event.Name is the file & path
+					results := predict(predictor, projectID, iterationID, event.Name, readDelay)
 					highestProbabilityTag := processResults(results, event.Name)
 					litterboxPicSet = append(litterboxPicSet, highestProbabilityTag)
 					// If this is the first photo then set a timer so we don't wait indef for 5 photos...
@@ -179,7 +182,7 @@ func determineResults(litterboxPicSet []LitterboxUser) (LitterboxUser, bool) {
 	var highestNegProbability = 0.0
 	var highestNegIndex int
 	var weHaveCat = false
-	fmt.Printf("litterboxPicSet: %v\n", litterboxPicSet)
+	//log.Printf("litterboxPicSet: %v\n", litterboxPicSet)
 	for index, element := range litterboxPicSet {
 		if element.Name != "Negative" {
 			if element.Probability > highestCatProbability {
@@ -200,16 +203,27 @@ func determineResults(litterboxPicSet []LitterboxUser) (LitterboxUser, bool) {
 	return litterboxPicSet[highestNegIndex], weHaveCat
 }
 
-func predict(predictor prediction.BaseClient, projectID uuid.UUID, iterationID uuid.UUID, filepath string) prediction.ImagePrediction {
+func predict(predictor prediction.BaseClient, projectID uuid.UUID, iterationID uuid.UUID, filepath string, readDelay int) prediction.ImagePrediction {
 
 	ctx := context.Background()
 	fmt.Println("Predicting...")
 
-	testImageData, err := ioutil.ReadFile(filepath)
-	if err != nil {
-		log.Fatal(err)
+	var testImageData []byte
+	var err error
+	retryCount := 0
+	//this is really UGLY. Finding that we error on the first file because it's not done writing when we read it.
+	for ok := true; ok; ok = (len(testImageData) == 0) {
+		testImageData, err = ioutil.ReadFile(filepath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("Length %v\n", len(testImageData))
+		if len(testImageData) == 0 {
+			retryCount++
+			time.Sleep(time.Duration(readDelay) * time.Second)
+		}
 	}
-
+	log.Printf("RetryCount = %v\n", retryCount)
 	results, err := predictor.PredictImage(ctx, projectID, ioutil.NopCloser(bytes.NewReader(testImageData)), &iterationID, "")
 	if err != nil {
 		fmt.Println("\n\npredictor.PredictImage Failed.")
@@ -235,36 +249,13 @@ func addLitterBoxTripToFirestore(user LitterboxUser) {
 	//TODO: Find cat first. Add if not found? Try this out.
 	_, _, err = client.Collection("cats").Doc(user.Name).Collection("LitterTrips").Add(ctx, map[string]interface{}{
 		"Probability": user.Probability,
-		// "Photo": user.Photo,
+		// "Photo": user.Photo, // eventually this will be the URL to the photo in Cloud Storage
 		"timestamp": firestore.ServerTimestamp,
 	})
 	if err != nil {
 		log.Fatalf("Failed adding litterbox trip: %v", err)
 	}
-
 }
-
-// func writeUserToFirestore(user LitterboxUser) {
-// 	opt := option.WithCredentialsFile("/Users/stevebargelt/Downloads/mycats-ba2ef-daea38db0d2e.json")
-// 	app, err := firebase.NewApp(context.Background(), nil, opt)
-// 	if err != nil {
-// 		log.Fatal(fmt.Errorf("error initializing app: %v", err))
-// 	}
-// 	app.
-// 	url := "https://us-central1-myupside-65eb1.cloudfunctions.net/databaseUserAddUpdate"
-// 	fmt.Println("Calling: ", url)
-
-// 	client := http.Client{}
-
-// 	userJSON, _ := json.Marshal(user)
-
-// 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(userJSON))
-// 	req.Header.Set("Content-Type", "application/json")
-// 	res, _ := client.Do(req)
-
-// 	io.Copy(os.Stdout, res.Body)
-
-// }
 
 func TestMyCats() {
 	fmt.Println("This is only a test!")
