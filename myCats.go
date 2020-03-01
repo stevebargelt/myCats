@@ -3,15 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
-	"net/http"
-	"os"
 	"time"
 
+	"cloud.google.com/go/firestore"
 	uuid "github.com/satori/go.uuid"
 	"github.com/spf13/viper"
 	"gopkg.in/fsnotify.v1"
@@ -24,6 +21,7 @@ import (
 
 type LitterboxUser struct {
 	Name        string
+	Photo       string
 	Probability float64
 }
 
@@ -38,6 +36,8 @@ func main() {
 	if err != nil {             // Handle errors reading the config file
 		panic(fmt.Errorf("Fatal error config file: %s \n", err))
 	}
+	viper.SetDefault("NUMBER_PHOTOS_IN_SET", 5)
+	viper.SetDefault("TIMEOUT", 15)
 
 	var (
 		projectIDString      = viper.GetString("CUSTOM_VISION_PROJECT_ID")
@@ -46,6 +46,8 @@ func main() {
 		endpointURL          = viper.GetString("CUSTOM_VISION_ENDPOINT")
 		iterationIDString    = viper.GetString("CUSTOM_VISION_ITERATION_ID")
 		watchFolder          = viper.GetString("WATCH_FOLDER")
+		photosInSet          = viper.GetInt("NUMBER_PHOTOS_IN_SET")
+		timeoutValue         = viper.GetInt("TIMEOUT")
 	)
 
 	if projectIDString == "" {
@@ -83,6 +85,8 @@ func main() {
 		fmt.Printf("Something went wrong creating Iteration UUID: %s", err)
 	}
 
+	predictor := prediction.New(predictionKey, endpointURL)
+
 	var litterboxPicSet []LitterboxUser
 
 	// creates a new file watcher
@@ -102,30 +106,33 @@ func main() {
 				//log.Println("event:", event)
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					log.Println("created file:", event.Name) //event.Name is the file & path
-					results := predict(predictionKey, endpointURL, projectID, iterationID, event.Name)
-					highestProbabilityTag := processResults(results)
+					results := predict(predictor, projectID, iterationID, event.Name)
+					highestProbabilityTag := processResults(results, event.Name)
 					litterboxPicSet = append(litterboxPicSet, highestProbabilityTag)
-					// TODO: If this is the first photo then set a timer so we don't wait indef for 5 photos...
+					// If this is the first photo then set a timer so we don't wait indef for 5 photos...
 					if len(litterboxPicSet) == 1 {
 						go func() {
-							time.Sleep(15 * time.Second)
+							time.Sleep(time.Duration(timeoutValue) * time.Second)
 							timeout <- true
 						}()
 					}
 					// Pic the best of the set of 5 pics
-					if len(litterboxPicSet) == 5 {
+					if len(litterboxPicSet) == photosInSet {
 						litterboxUser, weHaveCat := determineResults(litterboxPicSet)
+						doStuffWithResult(litterboxUser, weHaveCat)
 						litterboxPicSet = nil
-						if weHaveCat {
-							fmt.Printf("I am %v sure that %s used the catbox!\n", litterboxUser.Probability*100, litterboxUser.Name)
-						} else {
-							fmt.Printf("I am %v sure that we had a false motion event!\n", litterboxUser.Probability*100)
-						}
 					}
 				}
 			case <-timeout:
-				fmt.Println("Timed Out")
-
+				if len(litterboxPicSet) == 0 {
+					fmt.Printf("We Good. Timeout called but we processed %v pics.\n", photosInSet)
+				} else if len(litterboxPicSet) > 0 {
+					litterboxUser, weHaveCat := determineResults(litterboxPicSet)
+					doStuffWithResult(litterboxUser, weHaveCat)
+					litterboxPicSet = nil
+				} else {
+					fmt.Println("Timed Out")
+				}
 			case err := <-watcher.Errors:
 				log.Println("error:", err)
 			}
@@ -140,9 +147,20 @@ func main() {
 
 }
 
-func processResults(results prediction.ImagePrediction) LitterboxUser {
+func doStuffWithResult(litterboxUser LitterboxUser, weHaveCat bool) {
 
-	litterboxUser := LitterboxUser{"Negative", 0.00}
+	if weHaveCat {
+		fmt.Printf("I am %v%% sure that %s used the catbox!\n", litterboxUser.Probability*100, litterboxUser.Name)
+		addLitterBoxTripToFirestore(litterboxUser)
+	} else {
+		fmt.Printf("I am %v%% sure that we had a false motion event!\n", litterboxUser.Probability*100)
+	}
+
+}
+
+func processResults(results prediction.ImagePrediction, fileName string) LitterboxUser {
+
+	litterboxUser := LitterboxUser{"Negative", fileName, 0.00}
 	for _, prediction := range *results.Predictions {
 		fmt.Printf("\t%s: %.2f%%", *prediction.TagName, *prediction.Probability*100)
 		fmt.Println("")
@@ -182,11 +200,10 @@ func determineResults(litterboxPicSet []LitterboxUser) (LitterboxUser, bool) {
 	return litterboxPicSet[highestNegIndex], weHaveCat
 }
 
-func predict(predictionKey string, endpointURL string, projectID uuid.UUID, iterationID uuid.UUID, filepath string) prediction.ImagePrediction {
+func predict(predictor prediction.BaseClient, projectID uuid.UUID, iterationID uuid.UUID, filepath string) prediction.ImagePrediction {
 
 	ctx := context.Background()
 	fmt.Println("Predicting...")
-	predictor := prediction.New(predictionKey, endpointURL)
 
 	testImageData, err := ioutil.ReadFile(filepath)
 	if err != nil {
@@ -204,7 +221,7 @@ func predict(predictionKey string, endpointURL string, projectID uuid.UUID, iter
 // Next Steps?
 func addLitterBoxTripToFirestore(user LitterboxUser) {
 	ctx := context.Background()
-	sa := option.WithCredentialsFile("path/to/serviceAccount.json")
+	sa := option.WithCredentialsFile("/Users/stevebargelt/Downloads/mycats-ba2ef-2f24ef007822.json")
 	app, err := firebase.NewApp(ctx, nil, sa)
 	if err != nil {
 		log.Fatalln(err)
@@ -215,30 +232,39 @@ func addLitterBoxTripToFirestore(user LitterboxUser) {
 		log.Fatalln(err)
 	}
 	defer client.Close()
-
-	_, _, err = client.Collection("users").Add(ctx, user)
+	//TODO: Find cat first. Add if not found? Try this out.
+	_, _, err = client.Collection("cats").Doc(user.Name).Collection("LitterTrips").Add(ctx, map[string]interface{}{
+		"Probability": user.Probability,
+		// "Photo": user.Photo,
+		"timestamp": firestore.ServerTimestamp,
+	})
 	if err != nil {
 		log.Fatalf("Failed adding litterbox trip: %v", err)
 	}
 
 }
 
-func writeUserToFirestore(user LitterboxUser) {
+// func writeUserToFirestore(user LitterboxUser) {
+// 	opt := option.WithCredentialsFile("/Users/stevebargelt/Downloads/mycats-ba2ef-daea38db0d2e.json")
+// 	app, err := firebase.NewApp(context.Background(), nil, opt)
+// 	if err != nil {
+// 		log.Fatal(fmt.Errorf("error initializing app: %v", err))
+// 	}
+// 	app.
+// 	url := "https://us-central1-myupside-65eb1.cloudfunctions.net/databaseUserAddUpdate"
+// 	fmt.Println("Calling: ", url)
 
-	url := "https://us-central1-myupside-65eb1.cloudfunctions.net/databaseUserAddUpdate"
-	fmt.Println("Calling: ", url)
+// 	client := http.Client{}
 
-	client := http.Client{}
+// 	userJSON, _ := json.Marshal(user)
 
-	userJSON, _ := json.Marshal(user)
+// 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(userJSON))
+// 	req.Header.Set("Content-Type", "application/json")
+// 	res, _ := client.Do(req)
 
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(userJSON))
-	req.Header.Set("Content-Type", "application/json")
-	res, _ := client.Do(req)
+// 	io.Copy(os.Stdout, res.Body)
 
-	io.Copy(os.Stdout, res.Body)
-
-}
+// }
 
 func TestMyCats() {
 	fmt.Println("This is only a test!")

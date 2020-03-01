@@ -15,6 +15,7 @@ myCats
 
 env.sh
 config.yaml
+test.sh
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
