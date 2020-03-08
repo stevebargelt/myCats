@@ -17,6 +17,8 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/Azure/azure-sdk-for-go/services/cognitiveservices/v1.1/customvision/prediction"
+
+	c "./config"
 )
 
 type LitterboxUser struct {
@@ -42,54 +44,23 @@ func main() {
 	viper.SetDefault("TIMEOUT", 15)
 	viper.SetDefault("READ_DELAY", 1)
 
-	var (
-		projectIDString     = viper.GetString("CUSTOM_VISION_PROJECT_ID")
-		predictionKey       = viper.GetString("CUSTOM_VISION_PREDICTION_KEY")
-		endpointURL         = viper.GetString("CUSTOM_VISION_ENDPOINT")
-		iterationIDString   = viper.GetString("CUSTOM_VISION_ITERATION_ID")
-		watchFolder         = viper.GetString("WATCH_FOLDER")
-		firebaseCredentials = viper.GetString("GOOGLE_FIREBASE_CREDENTIAL_FILE")
-		photosInSet         = viper.GetInt("NUMBER_PHOTOS_IN_SET")
-		timeoutValue        = viper.GetInt("TIMEOUT")
-		readDelay           = viper.GetInt("READ_DELAY")
-	)
-
-	if projectIDString == "" {
-		log.Fatal("\n\nPlease set a CUSTOM_VISION_PROJECT_ID environment variable.\n" +
-			"**You may need to restart your shell or IDE after it's set.**")
+	var configuration c.Configuration
+	err = viper.Unmarshal(&configuration)
+	if err != nil {
+		fmt.Printf("Unable to decode into struct, %v", err)
 	}
 
-	if predictionKey == "" {
-		log.Fatal("\n\nPlease set a CUSTOM_VISION_PREDICTION_KEY environment variable.\n" +
-			"**You may need to restart your shell or IDE after it's set.**\n")
-	}
-
-	if endpointURL == "" {
-		log.Fatal("\n\nPlease set a CUSTOM_VISION_ENDPOINT environment variable.\n" +
-			"**You may need to restart your shell or IDE after it's set.**")
-	}
-
-	if iterationIDString == "" {
-		log.Fatal("\n\nPlease set a CUSTOM_VISION_ITERATION_ID environment variable.\n" +
-			"**You may need to restart your shell or IDE after it's set.**")
-	}
-
-	if firebaseCredentials == "" {
-		log.Fatal("\n\nPlease set a GOOGLE_FIREBASE_CREDENTIAL_FILE environment variable.\n" +
-			"**You may need to restart your shell or IDE after it's set.**")
-	}
-
-	projectID, err := uuid.FromString(projectIDString)
+	projectID, err := uuid.FromString(configuration.ProjectIDString)
 	if err != nil {
 		fmt.Printf("Something went wrong creating ProjectID UUID: %s", err)
 	}
 
-	iterationID, err := uuid.FromString(iterationIDString)
+	iterationID, err := uuid.FromString(configuration.IterationIDString)
 	if err != nil {
 		fmt.Printf("Something went wrong creating Iteration UUID: %s", err)
 	}
 
-	predictor := prediction.New(predictionKey, endpointURL)
+	predictor := prediction.New(configuration.PredictionKey, configuration.EndpointURL)
 
 	var litterboxPicSet []LitterboxUser
 
@@ -111,29 +82,29 @@ func main() {
 
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					log.Println("create file received:", event.Name) //event.Name is the file & path
-					results := predict(predictor, projectID, iterationID, event.Name, readDelay)
+					results := predict(predictor, projectID, iterationID, event.Name, configuration.ReadDelay)
 					highestProbabilityTag := processResults(results, event.Name)
 					litterboxPicSet = append(litterboxPicSet, highestProbabilityTag)
 					// If this is the first photo then set a timer so we don't wait indef for 5 photos...
 					if len(litterboxPicSet) == 1 {
 						go func() {
-							time.Sleep(time.Duration(timeoutValue) * time.Second)
+							time.Sleep(time.Duration(configuration.TimeoutValue) * time.Second)
 							timeout <- true
 						}()
 					}
 					// Pick the best of the set of 5 pics
-					if len(litterboxPicSet) == photosInSet {
+					if len(litterboxPicSet) == configuration.PhotosInSet {
 						litterboxUser, weHaveCat := determineResults(litterboxPicSet)
-						doStuffWithResult(litterboxUser, firebaseCredentials, weHaveCat)
+						doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, weHaveCat)
 						litterboxPicSet = nil
 					}
 				}
 			case <-timeout:
 				if len(litterboxPicSet) == 0 {
-					fmt.Printf("We Good. Timeout called but we processed %v pics.\n", photosInSet)
+					fmt.Printf("We Good. Timeout called but we processed %v pics.\n", configuration.PhotosInSet)
 				} else if len(litterboxPicSet) > 0 {
 					litterboxUser, weHaveCat := determineResults(litterboxPicSet)
-					doStuffWithResult(litterboxUser, firebaseCredentials, weHaveCat)
+					doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, weHaveCat)
 					litterboxPicSet = nil
 				} else {
 					fmt.Println("Timed Out")
@@ -144,7 +115,7 @@ func main() {
 		}
 	}()
 
-	err = watcher.Add(watchFolder)
+	err = watcher.Add(configuration.WatchFolder)
 	if err != nil {
 		log.Fatal(err)
 	}
