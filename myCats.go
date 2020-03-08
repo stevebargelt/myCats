@@ -20,9 +20,11 @@ import (
 )
 
 type LitterboxUser struct {
-	Name        string
-	Photo       string
-	Probability float64
+	Name                 string
+	NameProbability      float64
+	Direction            string
+	DirectionProbability float64
+	Photo                string
 }
 
 func main() {
@@ -31,25 +33,25 @@ func main() {
 	viper.SetConfigType("yaml")
 	// viper.AddConfigPath("/etc/catPredictor/")  // path to look for the config file in
 	// viper.AddConfigPath("$HOME/.catPredictor") // call multiple times to add many search paths
-	viper.AddConfigPath(".")    // look for config in the working directory
-	err := viper.ReadInConfig() // Find and read the config file
-	if err != nil {             // Handle errors reading the config file
-		panic(fmt.Errorf("Fatal error config file: %s \n", err))
+	viper.AddConfigPath(".") // look for config in the working directory
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("fatal error config file: %s ", err))
 	}
 	viper.SetDefault("NUMBER_PHOTOS_IN_SET", 5)
 	viper.SetDefault("TIMEOUT", 15)
 	viper.SetDefault("READ_DELAY", 1)
 
 	var (
-		projectIDString      = viper.GetString("CUSTOM_VISION_PROJECT_ID")
-		predictionKey        = viper.GetString("CUSTOM_VISION_PREDICTION_KEY")
-		predictionResourceID = viper.GetString("CUSTOM_VISION_RESOURCE_ID")
-		endpointURL          = viper.GetString("CUSTOM_VISION_ENDPOINT")
-		iterationIDString    = viper.GetString("CUSTOM_VISION_ITERATION_ID")
-		watchFolder          = viper.GetString("WATCH_FOLDER")
-		photosInSet          = viper.GetInt("NUMBER_PHOTOS_IN_SET")
-		timeoutValue         = viper.GetInt("TIMEOUT")
-		readDelay            = viper.GetInt("READ_DELAY")
+		projectIDString     = viper.GetString("CUSTOM_VISION_PROJECT_ID")
+		predictionKey       = viper.GetString("CUSTOM_VISION_PREDICTION_KEY")
+		endpointURL         = viper.GetString("CUSTOM_VISION_ENDPOINT")
+		iterationIDString   = viper.GetString("CUSTOM_VISION_ITERATION_ID")
+		watchFolder         = viper.GetString("WATCH_FOLDER")
+		firebaseCredentials = viper.GetString("GOOGLE_FIREBASE_CREDENTIAL_FILE")
+		photosInSet         = viper.GetInt("NUMBER_PHOTOS_IN_SET")
+		timeoutValue        = viper.GetInt("TIMEOUT")
+		readDelay           = viper.GetInt("READ_DELAY")
 	)
 
 	if projectIDString == "" {
@@ -62,11 +64,6 @@ func main() {
 			"**You may need to restart your shell or IDE after it's set.**\n")
 	}
 
-	if predictionResourceID == "" {
-		log.Fatal("\n\nPlease set a CUSTOM_VISION_RESOURCE_ID environment variable.\n" +
-			"**You may need to restart your shell or IDE after it's set.**\n")
-	}
-
 	if endpointURL == "" {
 		log.Fatal("\n\nPlease set a CUSTOM_VISION_ENDPOINT environment variable.\n" +
 			"**You may need to restart your shell or IDE after it's set.**")
@@ -74,6 +71,11 @@ func main() {
 
 	if iterationIDString == "" {
 		log.Fatal("\n\nPlease set a CUSTOM_VISION_ITERATION_ID environment variable.\n" +
+			"**You may need to restart your shell or IDE after it's set.**")
+	}
+
+	if firebaseCredentials == "" {
+		log.Fatal("\n\nPlease set a GOOGLE_FIREBASE_CREDENTIAL_FILE environment variable.\n" +
 			"**You may need to restart your shell or IDE after it's set.**")
 	}
 
@@ -119,10 +121,10 @@ func main() {
 							timeout <- true
 						}()
 					}
-					// Pic the best of the set of 5 pics
+					// Pick the best of the set of 5 pics
 					if len(litterboxPicSet) == photosInSet {
 						litterboxUser, weHaveCat := determineResults(litterboxPicSet)
-						doStuffWithResult(litterboxUser, weHaveCat)
+						doStuffWithResult(litterboxUser, firebaseCredentials, weHaveCat)
 						litterboxPicSet = nil
 					}
 				}
@@ -131,7 +133,7 @@ func main() {
 					fmt.Printf("We Good. Timeout called but we processed %v pics.\n", photosInSet)
 				} else if len(litterboxPicSet) > 0 {
 					litterboxUser, weHaveCat := determineResults(litterboxPicSet)
-					doStuffWithResult(litterboxUser, weHaveCat)
+					doStuffWithResult(litterboxUser, firebaseCredentials, weHaveCat)
 					litterboxPicSet = nil
 				} else {
 					fmt.Println("Timed Out")
@@ -150,27 +152,34 @@ func main() {
 
 }
 
-func doStuffWithResult(litterboxUser LitterboxUser, weHaveCat bool) {
+func doStuffWithResult(litterboxUser LitterboxUser, firebaseCredentials string, weHaveCat bool) {
 
 	if weHaveCat {
-		fmt.Printf("I am %v%% sure that %s used the catbox!\n", litterboxUser.Probability*100, litterboxUser.Name)
-		addLitterBoxTripToFirestore(litterboxUser)
+		fmt.Printf("I am %v%% sure that it was %s and I am ", litterboxUser.NameProbability*100, litterboxUser.Name)
+		fmt.Printf("%v%% sure that they were headed %s the catbox!\n", litterboxUser.DirectionProbability*100, litterboxUser.Direction)
+		addLitterBoxTripToFirestore(litterboxUser, firebaseCredentials)
 	} else {
-		fmt.Printf("I am %v%% sure that we had a false motion event!\n", litterboxUser.Probability*100)
+		fmt.Printf("I am %v%% sure that we had a false motion event!\n", litterboxUser.NameProbability*100)
 	}
-
 }
 
 func processResults(results prediction.ImagePrediction, fileName string) LitterboxUser {
 
-	litterboxUser := LitterboxUser{"Negative", fileName, 0.00}
+	litterboxUser := LitterboxUser{"Negative", 0.00, "None", 0.00, fileName}
 	for _, prediction := range *results.Predictions {
-		fmt.Printf("\t%s: %.2f%%", *prediction.TagName, *prediction.Probability*100)
-		fmt.Println("")
+		fmt.Printf("\t%s: %.2f%%\n", *prediction.TagName, *prediction.Probability*100)
+
 		//of the tags in the model pick the highest probability
-		if *prediction.Probability > litterboxUser.Probability {
+		// TODO: Use a slice for the direction, no magic strings and decouple the directions
+		// TODO: well we only care about the direction if this is the highest cat, right?
+		if *prediction.TagName == "in" || *prediction.TagName == "out" {
+			if *prediction.Probability > litterboxUser.DirectionProbability {
+				litterboxUser.Direction = *prediction.TagName
+				litterboxUser.DirectionProbability = *prediction.Probability
+			}
+		} else if *prediction.Probability > litterboxUser.NameProbability {
 			litterboxUser.Name = *prediction.TagName
-			litterboxUser.Probability = *prediction.Probability
+			litterboxUser.NameProbability = *prediction.Probability
 		}
 	}
 	return litterboxUser
@@ -185,14 +194,14 @@ func determineResults(litterboxPicSet []LitterboxUser) (LitterboxUser, bool) {
 	//log.Printf("litterboxPicSet: %v\n", litterboxPicSet)
 	for index, element := range litterboxPicSet {
 		if element.Name != "Negative" {
-			if element.Probability > highestCatProbability {
-				highestCatProbability = element.Probability
+			if element.NameProbability > highestCatProbability {
+				highestCatProbability = element.NameProbability
 				highestCatIndex = index
 				weHaveCat = true
 			}
 		} else {
-			if element.Probability > highestNegProbability {
-				highestNegProbability = element.Probability
+			if element.NameProbability > highestNegProbability {
+				highestNegProbability = element.NameProbability
 				highestNegIndex = index
 			}
 		}
@@ -217,7 +226,7 @@ func predict(predictor prediction.BaseClient, projectID uuid.UUID, iterationID u
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("Length %v\n", len(testImageData))
+		//fmt.Printf("Length %v\n", len(testImageData))
 		if len(testImageData) == 0 {
 			retryCount++
 			time.Sleep(time.Duration(readDelay) * time.Second)
@@ -233,9 +242,9 @@ func predict(predictor prediction.BaseClient, projectID uuid.UUID, iterationID u
 }
 
 // Next Steps?
-func addLitterBoxTripToFirestore(user LitterboxUser) {
+func addLitterBoxTripToFirestore(user LitterboxUser, firebaseCredentials string) {
 	ctx := context.Background()
-	sa := option.WithCredentialsFile("/Users/stevebargelt/Downloads/mycats-ba2ef-2f24ef007822.json")
+	sa := option.WithCredentialsFile(firebaseCredentials)
 	app, err := firebase.NewApp(ctx, nil, sa)
 	if err != nil {
 		log.Fatalln(err)
@@ -246,11 +255,13 @@ func addLitterBoxTripToFirestore(user LitterboxUser) {
 		log.Fatalln(err)
 	}
 	defer client.Close()
-	//TODO: Find cat first. Add if not found? Try this out.
+	//TODO: Find cat first. Add if not found?
 	_, _, err = client.Collection("cats").Doc(user.Name).Collection("LitterTrips").Add(ctx, map[string]interface{}{
-		"Probability": user.Probability,
-		// "Photo": user.Photo, // eventually this will be the URL to the photo in Cloud Storage
-		"timestamp": firestore.ServerTimestamp,
+		"Probability":          user.NameProbability,
+		"Direction":            user.Direction,
+		"DirectionProbability": user.DirectionProbability,
+		"Photo":                user.Photo, // right now this is the local name. Could be the URL to the photo in Cloud Storage.
+		"timestamp":            firestore.ServerTimestamp,
 	})
 	if err != nil {
 		log.Fatalf("Failed adding litterbox trip: %v", err)
