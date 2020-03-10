@@ -9,6 +9,7 @@ type Configuration struct {
 	IterationID          string `mapstructure:"CUSTOM_VISION_ITERATION_ID"`
 	IterationIDDirection string `mapstructure:"CUSTOM_VISION_ITERATION_DIRECTION_ID"`
 	WatchFolder          string `mapstructure:"WATCH_FOLDER"`
+	ProcessedFolder      string `mapstructure:"PROCESSED_FOLDER"`
 	FirebaseCredentials  string `mapstructure:"GOOGLE_FIREBASE_CREDENTIAL_FILE"`
 	FirestoreCollection  string `mapstructure:"GOOGLE_FIRESTORE_COLLECTION"`
 	PhotosInSet          int    `mapstructure:"NUMBER_PHOTOS_IN_SET"`

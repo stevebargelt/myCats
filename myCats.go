@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
+	"path"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -109,18 +111,22 @@ func main() {
 							setDirection(directionResults, &litterboxUser)
 						}
 						doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, configuration.FirestoreCollection, weHaveCat)
+						moveProcessedFiles(litterboxPicSet, configuration.ProcessedFolder)
 						litterboxPicSet = nil
 					}
 				}
 			case <-timeout:
 				if len(litterboxPicSet) == 0 {
 					fmt.Printf("We Good. Timeout called but we processed %v pics.\n", configuration.PhotosInSet)
+
 				} else if len(litterboxPicSet) > 0 {
 					litterboxUser, weHaveCat := determineResults(litterboxPicSet)
 					if weHaveCat {
 						directionResults := predict(predictor, projectIDDirection, iterationIDDirection, litterboxUser.Photo, configuration.ReadDelay)
 						setDirection(directionResults, &litterboxUser)
 					}
+					doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, configuration.FirestoreCollection, weHaveCat)
+					moveProcessedFiles(litterboxPicSet, configuration.ProcessedFolder)
 					litterboxPicSet = nil
 				} else {
 					fmt.Println("Timed Out")
@@ -263,6 +269,19 @@ func addLitterBoxTripToFirestore(user LitterboxUser, firebaseCredentials string,
 	})
 	if err != nil {
 		log.Fatalf("Failed adding litterbox trip: %v", err)
+	}
+}
+
+func moveProcessedFiles(litterboxPicSet []LitterboxUser, processedFolder string) {
+
+	for _, litterboxUser := range litterboxPicSet {
+		//fmt.Printf("Photo: %s\n", litterboxUser.Photo)
+		_, file := path.Split(litterboxUser.Photo)
+		newpath := path.Join(processedFolder, file)
+		err := os.Rename(litterboxUser.Photo, newpath)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 }
 
