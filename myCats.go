@@ -117,7 +117,10 @@ func main() {
 					fmt.Printf("We Good. Timeout called but we processed %v pics.\n", configuration.PhotosInSet)
 				} else if len(litterboxPicSet) > 0 {
 					litterboxUser, weHaveCat := determineResults(litterboxPicSet)
-					doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, configuration.FirestoreCollection, weHaveCat)
+					if weHaveCat {
+						directionResults := predict(predictor, projectIDDirection, iterationIDDirection, litterboxUser.Photo, configuration.ReadDelay)
+						setDirection(directionResults, &litterboxUser)
+					}
 					litterboxPicSet = nil
 				} else {
 					fmt.Println("Timed Out")
