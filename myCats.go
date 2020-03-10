@@ -18,9 +18,10 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/services/cognitiveservices/v1.1/customvision/prediction"
 
-	c "./config"
+	config "github.com/stevebargelt/myCats/config"
 )
 
+// LitterboxUser = defines the attributes of a cat using the litterbox
 type LitterboxUser struct {
 	Name                 string
 	NameProbability      float64
@@ -44,20 +45,30 @@ func main() {
 	viper.SetDefault("TIMEOUT", 15)
 	viper.SetDefault("READ_DELAY", 1)
 
-	var configuration c.Configuration
+	var configuration config.Configuration
 	err = viper.Unmarshal(&configuration)
 	if err != nil {
 		fmt.Printf("Unable to decode into struct, %v", err)
 	}
 
-	projectID, err := uuid.FromString(configuration.ProjectIDString)
+	projectID, err := uuid.FromString(configuration.ProjectID)
 	if err != nil {
 		fmt.Printf("Something went wrong creating ProjectID UUID: %s", err)
 	}
 
-	iterationID, err := uuid.FromString(configuration.IterationIDString)
+	projectIDDirection, err := uuid.FromString(configuration.ProjectIDDirection)
+	if err != nil {
+		fmt.Printf("Something went wrong creating ProjectID UUID: %s", err)
+	}
+
+	iterationID, err := uuid.FromString(configuration.IterationID)
 	if err != nil {
 		fmt.Printf("Something went wrong creating Iteration UUID: %s", err)
+	}
+
+	iterationIDDirection, err := uuid.FromString(configuration.IterationIDDirection)
+	if err != nil {
+		fmt.Printf("Something went wrong creating Iteration Direction UUID: %s", err)
 	}
 
 	predictor := prediction.New(configuration.PredictionKey, configuration.EndpointURL)
@@ -78,12 +89,10 @@ func main() {
 		for {
 			select {
 			case event := <-watcher.Events:
-				//log.Println("event:", event)
-
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					log.Println("create file received:", event.Name) //event.Name is the file & path
 					results := predict(predictor, projectID, iterationID, event.Name, configuration.ReadDelay)
-					highestProbabilityTag := processResults(results, event.Name)
+					highestProbabilityTag := processCatResults(results, event.Name)
 					litterboxPicSet = append(litterboxPicSet, highestProbabilityTag)
 					// If this is the first photo then set a timer so we don't wait indef for 5 photos...
 					if len(litterboxPicSet) == 1 {
@@ -95,7 +104,11 @@ func main() {
 					// Pick the best of the set of 5 pics
 					if len(litterboxPicSet) == configuration.PhotosInSet {
 						litterboxUser, weHaveCat := determineResults(litterboxPicSet)
-						doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, weHaveCat)
+						if weHaveCat {
+							directionResults := predict(predictor, projectIDDirection, iterationIDDirection, litterboxUser.Photo, configuration.ReadDelay)
+							setDirection(directionResults, &litterboxUser)
+						}
+						doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, configuration.FirestoreCollection, weHaveCat)
 						litterboxPicSet = nil
 					}
 				}
@@ -104,7 +117,7 @@ func main() {
 					fmt.Printf("We Good. Timeout called but we processed %v pics.\n", configuration.PhotosInSet)
 				} else if len(litterboxPicSet) > 0 {
 					litterboxUser, weHaveCat := determineResults(litterboxPicSet)
-					doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, weHaveCat)
+					doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, configuration.FirestoreCollection, weHaveCat)
 					litterboxPicSet = nil
 				} else {
 					fmt.Println("Timed Out")
@@ -123,37 +136,48 @@ func main() {
 
 }
 
-func doStuffWithResult(litterboxUser LitterboxUser, firebaseCredentials string, weHaveCat bool) {
+func doStuffWithResult(litterboxUser LitterboxUser, firebaseCredentials string, firestoreCollection string, weHaveCat bool) {
 
 	if weHaveCat {
 		fmt.Printf("I am %v%% sure that it was %s and I am ", litterboxUser.NameProbability*100, litterboxUser.Name)
 		fmt.Printf("%v%% sure that they were headed %s the catbox!\n", litterboxUser.DirectionProbability*100, litterboxUser.Direction)
-		addLitterBoxTripToFirestore(litterboxUser, firebaseCredentials)
+		addLitterBoxTripToFirestore(litterboxUser, firebaseCredentials, firestoreCollection)
 	} else {
 		fmt.Printf("I am %v%% sure that we had a false motion event!\n", litterboxUser.NameProbability*100)
 	}
 }
 
-func processResults(results prediction.ImagePrediction, fileName string) LitterboxUser {
+func processCatResults(results prediction.ImagePrediction, fileName string) LitterboxUser {
 
-	litterboxUser := LitterboxUser{"Negative", 0.00, "None", 0.00, fileName}
+	//Process the results of ONE image... loop through the tag predictions in the image
+
+	litterboxUser := LitterboxUser{"Negative", 0.00, "", 0.00, fileName}
 	for _, prediction := range *results.Predictions {
 		fmt.Printf("\t%s: %.2f%%\n", *prediction.TagName, *prediction.Probability*100)
 
 		//of the tags in the model pick the highest probability
-		// TODO: Use a slice for the direction, no magic strings and decouple the directions
-		// TODO: well we only care about the direction if this is the highest cat, right?
+		// TODO: Use a slice or enum for the direction, no magic strings and decouple the directions
+		if *prediction.Probability > litterboxUser.NameProbability {
+			litterboxUser.Name = *prediction.TagName
+			litterboxUser.NameProbability = *prediction.Probability
+			litterboxUser.Photo = fileName
+		}
+	}
+	return litterboxUser
+}
+
+func setDirection(directionResults prediction.ImagePrediction, litterboxUser *LitterboxUser) {
+
+	for _, prediction := range *directionResults.Predictions {
+		fmt.Printf("\t%s: %.2f%%\n", *prediction.TagName, *prediction.Probability*100)
+
 		if *prediction.TagName == "in" || *prediction.TagName == "out" {
 			if *prediction.Probability > litterboxUser.DirectionProbability {
 				litterboxUser.Direction = *prediction.TagName
 				litterboxUser.DirectionProbability = *prediction.Probability
 			}
-		} else if *prediction.Probability > litterboxUser.NameProbability {
-			litterboxUser.Name = *prediction.TagName
-			litterboxUser.NameProbability = *prediction.Probability
 		}
 	}
-	return litterboxUser
 }
 
 func determineResults(litterboxPicSet []LitterboxUser) (LitterboxUser, bool) {
@@ -213,7 +237,7 @@ func predict(predictor prediction.BaseClient, projectID uuid.UUID, iterationID u
 }
 
 // Next Steps?
-func addLitterBoxTripToFirestore(user LitterboxUser, firebaseCredentials string) {
+func addLitterBoxTripToFirestore(user LitterboxUser, firebaseCredentials string, firestoreCollection string) {
 	ctx := context.Background()
 	sa := option.WithCredentialsFile(firebaseCredentials)
 	app, err := firebase.NewApp(ctx, nil, sa)
@@ -227,7 +251,7 @@ func addLitterBoxTripToFirestore(user LitterboxUser, firebaseCredentials string)
 	}
 	defer client.Close()
 	//TODO: Find cat first. Add if not found?
-	_, _, err = client.Collection("cats").Doc(user.Name).Collection("LitterTrips").Add(ctx, map[string]interface{}{
+	_, _, err = client.Collection(firestoreCollection).Doc(user.Name).Collection("LitterTrips").Add(ctx, map[string]interface{}{
 		"Probability":          user.NameProbability,
 		"Direction":            user.Direction,
 		"DirectionProbability": user.DirectionProbability,
@@ -239,6 +263,7 @@ func addLitterBoxTripToFirestore(user LitterboxUser, firebaseCredentials string)
 	}
 }
 
+// TestMyCats = Test Entry Point
 func TestMyCats() {
 	fmt.Println("This is only a test!")
 }

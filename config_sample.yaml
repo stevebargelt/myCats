@@ -1,18 +1,20 @@
 # Project ID
 #     https://www.customvision.ai/Select the Project, then the Settings Gear Icon
 CUSTOM_VISION_PROJECT_ID:
+CUSTOM_VISION_PROJECT_DIRECTION_ID:
 
 # Iteration ID
 #    https://www.customvision.ai/ Select the Project, then select performance
 CUSTOM_VISION_ITERATION_ID:
-
-# prediction
+CUSTOM_VISION_ITERATION_DIRECTION_ID:
+  # prediction
 #    https://portal.azure.com -> Goto the Prediction Cognitive Services - Resrouce, then in Keys or Quickstart you can find the endpoint and key(S)
 CUSTOM_VISION_ENDPOINT:
 CUSTOM_VISION_PREDICTION_KEY:
 
 # Firestore
 GOOGLE_FIREBASE_CREDENTIAL_FILE:
+GOOGLE_FIRESTORE_COLLECTION:
 
 # Application
 WATCH_FOLDER:
