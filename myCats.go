@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -21,6 +19,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/cognitiveservices/v1.1/customvision/prediction"
 
 	config "github.com/stevebargelt/myCats/config"
+	vision "github.com/stevebargelt/myCats/vision"
 )
 
 // LitterboxUser = defines the attributes of a cat using the litterbox
@@ -87,13 +86,26 @@ func main() {
 	done := make(chan bool)
 	timeout := make(chan bool, 1)
 
+	catPredictor := new(vision.ImagePredictor)
+	catPredictor.ProjectID = projectID
+	catPredictor.IterationID = iterationID
+	catPredictor.Predictor = predictor
+	catPredictor.ReadDelay = configuration.ReadDelay
+
+	directionPredictor := new(vision.ImagePredictor)
+	directionPredictor.ProjectID = projectIDDirection
+	directionPredictor.IterationID = iterationIDDirection
+	directionPredictor.Predictor = predictor
+	directionPredictor.ReadDelay = configuration.ReadDelay
+
 	go func() {
 		for {
 			select {
 			case event := <-watcher.Events:
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					log.Println("create file received:", event.Name) //event.Name is the file & path
-					results := predict(predictor, projectID, iterationID, event.Name, configuration.ReadDelay)
+					catPredictor.FilePath = event.Name
+					results := catPredictor.Predict()
 					highestProbabilityTag := processCatResults(results, event.Name)
 					litterboxPicSet = append(litterboxPicSet, highestProbabilityTag)
 					// If this is the first photo then set a timer so we don't wait indef for 5 photos...
@@ -107,7 +119,8 @@ func main() {
 					if len(litterboxPicSet) == configuration.PhotosInSet {
 						litterboxUser, weHaveCat := determineResults(litterboxPicSet)
 						if weHaveCat {
-							directionResults := predict(predictor, projectIDDirection, iterationIDDirection, litterboxUser.Photo, configuration.ReadDelay)
+							directionPredictor.FilePath = litterboxUser.Photo
+							directionResults := directionPredictor.Predict()
 							setDirection(directionResults, &litterboxUser)
 						}
 						doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, configuration.FirestoreCollection, weHaveCat)
@@ -122,7 +135,8 @@ func main() {
 				} else if len(litterboxPicSet) > 0 {
 					litterboxUser, weHaveCat := determineResults(litterboxPicSet)
 					if weHaveCat {
-						directionResults := predict(predictor, projectIDDirection, iterationIDDirection, litterboxUser.Photo, configuration.ReadDelay)
+						directionPredictor.FilePath = litterboxUser.Photo
+						directionResults := directionPredictor.Predict()
 						setDirection(directionResults, &litterboxUser)
 					}
 					doStuffWithResult(litterboxUser, configuration.FirebaseCredentials, configuration.FirestoreCollection, weHaveCat)
@@ -214,35 +228,6 @@ func determineResults(litterboxPicSet []LitterboxUser) (LitterboxUser, bool) {
 		return litterboxPicSet[highestCatIndex], weHaveCat
 	}
 	return litterboxPicSet[highestNegIndex], weHaveCat
-}
-
-func predict(predictor prediction.BaseClient, projectID uuid.UUID, iterationID uuid.UUID, filepath string, readDelay int) prediction.ImagePrediction {
-
-	ctx := context.Background()
-	fmt.Println("Predicting...")
-
-	var testImageData []byte
-	var err error
-	retryCount := 0
-	//this is really UGLY. Finding that we error on the first file because it's not done writing when we read it.
-	for ok := true; ok; ok = (len(testImageData) == 0) {
-		testImageData, err = ioutil.ReadFile(filepath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		//fmt.Printf("Length %v\n", len(testImageData))
-		if len(testImageData) == 0 {
-			retryCount++
-			time.Sleep(time.Duration(readDelay) * time.Second)
-		}
-	}
-	log.Printf("RetryCount = %v\n", retryCount)
-	results, err := predictor.PredictImage(ctx, projectID, ioutil.NopCloser(bytes.NewReader(testImageData)), &iterationID, "")
-	if err != nil {
-		fmt.Println("\n\npredictor.PredictImage Failed.")
-		log.Fatal(err)
-	}
-	return results
 }
 
 // Next Steps?
